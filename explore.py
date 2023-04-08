@@ -11,26 +11,40 @@ import support as sp
 
 class StationExplorer:
     """ Класс для исследования станции.
-    - station_name: имя станции
-    - height: глубина станции
-    - az_path: путь до Аz-файла 
-    - p_path: путь до Р-файла 
-    - p_start, p_stop: время измерений Р
-    - az_start, az_stop: время измерений Az
-    - period: рассматриваемый рабочий промежуток в часах
-    - start_point: начало рабочего периода для станции
+        Параметры:
+        - station_name: имя станции
+        - height: глубина станции
+        - az_path: путь до Аz-файла 
+        - p_path: путь до Р-файла aaa
+        - p_start, p_stop: время измерений Р
+        - az_start, az_stop: время измерений Az
+        - period: рассматриваемый рабочий промежуток в часах
+        Kwargs:
+        - start_point: начало рабочего периода для станции
+        - az_back_cut: размер "отрезанного сзади куска" az
+        - p_back_cut: размер "отрезанного сзади куска" p
+        - p_divisor: делитель при считывании массива p
+        - psd_ylim: пределы графика power spec dens
     """
     def __init__(self, station_name, height,
                  az_path, p_path, 
                  p_start, p_stop, 
                  az_start, az_stop,
-                 period=1, start_point=None):
+                 period=1, **kwargs):
         self.station_name = station_name
-        self.period = period
-        self.start_point = start_point
         self.az_path, self.p_path = az_path, p_path
         self.p_start, self.p_stop = p_start, p_stop
         self.az_start, self.az_stop = az_start, az_stop
+        self.period = period
+        self.start_point = kwargs['start_point'] if 'start_point' in kwargs else None
+        self.az_back_cut = kwargs['az_back_cut'] if 'az_back_cut' in kwargs else None
+        self.p_back_cut = kwargs['p_back_cut'] if 'p_back_cut' in kwargs else None
+        self.psd_ylim = kwargs['psd_ylim'] if 'psd_ylim' in kwargs else [1e12, 1e14]
+        self.p_divisor = kwargs['p_divisor'] if 'p_divisor' in kwargs else 1
+        self.ae_path = kwargs['ae_path'] if 'ae_path' in kwargs else None
+        self.an_path = kwargs['an_path'] if 'an_path' in kwargs else None
+        self.relief_obj = kwargs['relief_obj'] if 'relief_obj' in kwargs else None
+
         
         self.freq_gravity = 0.366 * np.sqrt(9.80665/height)
         self.freq_acoustic = 1500 / 4 / height
@@ -42,8 +56,8 @@ class StationExplorer:
         if not self.start_point:
             self.draw_basic()                                                               # построение начальных графиков
             self.start_point = int(input('Введите промежуток начала колебаний: '))          # выбор точки начала анализа
-        self.az_osc = self.az[self.start_point: self.start_point+36000*self.period]         # выделение рабочих участков
-        self.p_osc = self.p[self.start_point: self.start_point+36000*self.period]
+        self.az_osc = self.az[self.start_point: self.start_point+int(36000*self.period)]    # выделение рабочих участков
+        self.p_osc = self.p[self.start_point: self.start_point+int(36000*self.period)]
         self.analyze()                                                                      # анализ станции
         
         
@@ -53,10 +67,25 @@ class StationExplorer:
         print(f'Время начала измерений: {"-".join(map(str, self.res_start))}', 
               f'Время конца измерений: {"-".join(map(str, self.res_stop))}', sep='\n')
 
-        self.az, self.az_mean = sp.read_file(self.az_path, float)                           # исследуемый массив ускорений
-        self.p, self.p_mean = sp.read_file(self.p_path, lambda x: int(x) / 10)              # исследуемый массив давлений
-        self.theoretical_p_ratio = (self.p_mean/9.80665)**2                                 # для графика отношения мощностей
 
+        # разное в завис от того исследуем ли горизонт ускорение
+        if self.an_path and self.ae_path and self.relief_obj:
+            self.az = sp.read_file2(self.az_path, float) 
+            self.ae = sp.read_file2(self.ae_path, float) 
+            self.an = sp.read_file2(self.an_path, float) 
+            grad_e, grad_n = self.relief_obj.stations.query(f'station == "{self.station_name.lower()}"')[['grad_east', 'grad_north']].iloc[0]
+            self.az = self.az - np.array(self.ae)*grad_e - np.array(self.an)*grad_n
+            self.az_mean = np.mean(self.az)                            
+            self.az = [x - self.az_mean for x in self.az]   
+        else:
+            self.az, self.az_mean = sp.read_file(self.az_path, float)                           # исследуемый массив ускорений
+            
+            
+        self.p, self.p_mean = sp.read_file(self.p_path, lambda x: int(x) / self.p_divisor)  # исследуемый массив давлений
+        self.theoretical_p_ratio = (self.p_mean/9.80665)**2                                 # для графика отношения мощностей
+        
+        if self.az_back_cut: self.az = self.az[:len(self.az) - self.az_back_cut]
+        if self.p_back_cut: self.p = self.p[:len(self.p) - self.p_back_cut]
 
         # 1 сек = 10 промежутков, 1 мин = 600 промежутков, 1 час = 36000 промежутков  
         dur_time = sp.time_delta(self.res_stop, self.res_start)                             # Длительность всех измерений
@@ -159,7 +188,7 @@ class StationExplorer:
         # Power spectral density ratio
         sns.lineplot(x=self.freq1, y=self.relation_Sp_and_Saz, ax=axs[1][1]).set(**psd_dic)
         axs[1][1].set_xlim([1e-2, 25e-2])
-        axs[1][1].set_ylim([1e12, 1e14])
+        axs[1][1].set_ylim(self.psd_ylim)
         axs[1][1].axvline(x=self.freq_acoustic, c='g', linestyle=':')
         axs[1][1].axvline(x=self.freq_gravity, c='g', linestyle=':')
         axs[1][1].axvline(x=self.freq_experimental, c='g', linestyle=':')
